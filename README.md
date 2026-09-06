@@ -59,6 +59,24 @@ macOS 也可以双击 `启动工作台.command`。打开 <http://127.0.0.1:8765>
 
 Render 免费实例没有适合当前浏览器会话的持久运行环境，正式产品优先使用带持久磁盘的云服务器。
 
+### 当天可用：Cloudflare Tunnel
+
+Cloudflare Pages 只能托管前端文件，不能直接运行本项目的 FastAPI、MCP 子进程和持久 Chrome。需要快速得到一个可访问地址时，可以让 Cloudflare Tunnel 安全转发到本机完整产品：
+
+1. 使用远程访问模式启动产品：
+
+   ```bash
+   ALLOW_REMOTE=1 .venv/bin/python -m uvicorn backend.app:app --host 127.0.0.1 --port 8765
+   ```
+
+2. 在 Cloudflare 控制台进入 **Networking → Tunnels**，创建名为 `youju-xhs` 的 Tunnel。
+3. 选择 macOS，复制控制台生成的安装命令并在本机执行；不要把 Tunnel Token 写入仓库或聊天。
+4. 在 Tunnel 的 **Routes** 中添加 **Published application**，Service URL 填写 `http://localhost:8765`。
+5. 使用自己的域名时填写一个子域名，例如 `youju.example.com`。保存后等待 Tunnel 状态变为 Healthy。
+6. 在 **Zero Trust → Access controls → Applications** 中为这个域名创建 Self-hosted 应用，只允许自己的邮箱访问。
+
+此方式运行的是完整产品，模型 API、小红书 Chrome 登录与工作区数据仍保存在本机。电脑关机或本地服务停止后，外部地址会暂时不可用。
+
 ## 仓库数据策略
 
 Git 只跟踪 `data/showcase.json` 脱敏展示快照。以下内容始终排除：

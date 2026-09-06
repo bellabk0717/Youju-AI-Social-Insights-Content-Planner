@@ -16,6 +16,7 @@ from backend.writing import content_quality_issues, select_style_references
 
 ROOT=Path(__file__).resolve().parents[1]; DATA=ROOT/'data';DATA.mkdir(exist_ok=True)
 SHOWCASE_MODE=os.getenv('SHOWCASE_MODE','').lower() in {'1','true','yes'}
+ALLOW_REMOTE=os.getenv('ALLOW_REMOTE','').lower() in {'1','true','yes'}
 STATEFILE=DATA/'workspace.json'
 state=json.loads(STATEFILE.read_text()) if STATEFILE.exists() else {'records':[],'logs':[],'task':{},'analysis':None,'plan':None,'job':{'status':'idle'}}
 SHOWCASEFILE=DATA/'showcase.json'
@@ -67,11 +68,12 @@ async def local_only(request:Request,call_next):
         if request.method not in {'GET','HEAD','OPTIONS'}:
             return JSONResponse({'detail':'在线版本用于查看已归档案例；真实采集与生成请在本地运行。'},status_code=403)
         return await call_next(request)
-    origin=request.headers.get('origin','')
-    if origin and origin not in ['http://127.0.0.1:8765','http://localhost:8765']:
-        return Response('Local access only',status_code=403)
-    if request.headers.get('host','').split(':')[0] not in ['127.0.0.1','localhost','testserver']:
-        return Response('Local access only',status_code=403)
+    if not ALLOW_REMOTE:
+        origin=request.headers.get('origin','')
+        if origin and origin not in ['http://127.0.0.1:8765','http://localhost:8765']:
+            return Response('Local access only',status_code=403)
+        if request.headers.get('host','').split(':')[0] not in ['127.0.0.1','localhost','testserver']:
+            return Response('Local access only',status_code=403)
     return await call_next(request)
 
 async def tool(name,args):
