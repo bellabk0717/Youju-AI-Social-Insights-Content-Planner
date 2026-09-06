@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: xiaohongshu-content-research-agent
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    envVars:
+      - key: SHOWCASE_MODE
+        value: "1"
+      - key: PYTHON_VERSION
+        value: "3.12.11"
