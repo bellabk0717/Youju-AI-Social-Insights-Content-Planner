@@ -45,18 +45,43 @@ macOS 也可以双击 `启动工作台.command`。打开 <http://127.0.0.1:8765>
 
 当前共 21 项测试，覆盖搜索层级、产品类型识别、证据引用、事实匹配、URL 边界、检索、数字检查和标题质量等关键逻辑。
 
-## 发布在线展示版
+## 两个独立交付物
 
-项目根目录的 `render.yaml` 已配置 Render Web Service。在线环境设置 `SHOWCASE_MODE=1` 后：
+### 1. 完整产品
 
-- 加载仓库内的脱敏案例快照；
-- 保留三页产品界面、折叠分析、笔记卡片和 Markdown 导出；
-- 关闭登录、重新采集、模型连接和写入接口；
-- 不启动本地 Chrome 或小红书 MCP 进程。
+`backend/` 与 `frontend/` 组成可运行产品，保留小红书登录、真实 MCP 采集、分层检索、RAG、模型分析、笔记生成、人工修改和导出。当前版本适合本机演示或单用户私有部署。
 
-在 Render 控制台选择 **New → Blueprint**，连接本仓库并应用 `render.yaml` 即可。免费实例长时间无人访问后会休眠，首次打开可能需要等待约一分钟。
+公开给多人使用前，需要补充用户登录、数据库、对象存储、异步任务队列、每位用户独立的平台会话及数据采集合规方案。建议先部署到阿里云 ECS/轻量应用服务器或华为云 ECS 做私有测试；服务器需要 Python、Chrome、持久磁盘和 HTTPS 反向代理。
 
-完整采集版需要一个能运行可视化 Chrome、保存登录态并限制单用户访问的主机，不适合直接做成公共匿名服务。
+### 2. 静态展示站
+
+静态站复用完整产品的三页界面，读取 `data/showcase.json` 中已脱敏的 nana’s green tea 案例。它不调用后端、不需要模型 API 或小红书登录，同时保留页面切换、折叠证据、笔记卡片和浏览器内 Markdown 导出。
+
+生成静态站：
+
+```bash
+.venv/bin/python scripts/build_static_showcase.py
+```
+
+产物位于 `showcase-site/`。把该目录里的全部文件上传到任意静态网站托管即可。
+
+#### 阿里云 OSS（推荐新加坡地域）
+
+1. 新建 OSS Bucket，地域选择新加坡。
+2. 上传 `showcase-site/` 内的全部文件到 Bucket 根目录。
+3. 开启“静态页面”，默认首页设为 `index.html`，默认 404 页设为 `404.html`。
+4. 为 Bucket 配置允许匿名读取网站文件的权限。
+5. 绑定自定义域名并开启 HTTPS；需要时再接入 CDN。
+
+#### 华为云 OBS
+
+1. 新建 OBS 桶并上传 `showcase-site/` 内的全部文件。
+2. 开启“静态网站托管”，首页设为 `index.html`，错误页设为 `404.html`。
+3. 设置网站文件可公开读取，绑定自定义域名并配置 HTTPS。
+
+如果域名接入中国大陆地域的云服务，需先完成 ICP 备案。没有备案时可使用新加坡等境外地域。
+
+`render.yaml` 仍保留为可选的后端只读演示部署；纯展示优先使用 OSS 或 OBS，打开速度更稳定，也不会遇到免费后端休眠。
 
 ## 仓库数据策略
 
@@ -73,6 +98,8 @@ Git 只跟踪 `data/showcase.json` 脱敏展示快照。以下内容始终排除
 backend/             FastAPI、研究流程、写作检查和只读 MCP
 frontend/            原生 HTML、CSS、JavaScript 三步工作台
 data/showcase.json   可公开的脱敏展示案例
+scripts/             静态展示站构建脚本
+showcase-site/       可直接上传 OSS/OBS 的静态网站
 tests/               核心逻辑测试
 render.yaml          Render 在线展示配置
 启动工作台.command    macOS 本地启动入口

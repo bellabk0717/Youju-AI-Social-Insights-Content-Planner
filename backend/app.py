@@ -23,7 +23,7 @@ if SHOWCASEFILE.exists():
     archived=json.loads(SHOWCASEFILE.read_text())
     needs_showcase=(not state.get('records') and not state.get('analysis') and not state.get('plan')) or state.get('showcase_version',0)<archived.get('showcase_version',1)
     if needs_showcase:
-        state.update(records=archived['records'],coverage=archived['coverage'],analysis=archived['analysis'],plan=archived['plan'],archive_counts=archived['archive_counts'],showcase_version=archived.get('showcase_version',1))
+        state.update(task=archived.get('task',state.get('task',{})),records=archived['records'],coverage=archived['coverage'],analysis=archived['analysis'],plan=archived['plan'],archive_counts=archived['archive_counts'],showcase_version=archived.get('showcase_version',1))
         state['job']={'status':'idle','message':'展示案例已从本地归档恢复'}
 if state['job'].get('status')=='running':state['job']={'status':'interrupted','message':'上次任务中断，可重新开始。'}
 if state.get('plan') and state.get('task'):

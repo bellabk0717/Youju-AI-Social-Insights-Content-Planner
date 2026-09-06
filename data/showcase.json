@@ -1,5 +1,20 @@
 {
-  "showcase_version": 3,
+  "showcase_version": 4,
+  "task": {
+    "store": "nana’s green tea 新加坡",
+    "city": "新加坡",
+    "product": "店内 soft serve 系列",
+    "facts": "用户提供的策划对象是新加坡 nana’s green tea，门店位于 Tanjong Pagar，抹茶是核心品类，本次推广店内 soft serve 系列。具体在售口味、价格、优惠及完整产品清单尚未核实。小红书提到的小隔间、插座、Wifi和停留体验属于用户评价，除非门店资料再次确认，不作为官方承诺。",
+    "objective": "找到抹茶、soft serve 与舒适停留场景的真实用户关注点，生成自然分享语气的小红书系列笔记策划。",
+    "area": "Tanjong Pagar",
+    "query": "",
+    "limit": 12,
+    "plan_count": 3,
+    "focus": "balanced",
+    "focus_custom": "",
+    "materials": [],
+    "confirmed": true
+  },
   "archive_counts": {"notes": 7, "comments": 44},
   "records": [
     {"source_id":"Ncf8296390b5a","content_type":"note","title":"🇸🇬Nana’s Green Tea","text":"🍵抹茶为主，抹茶冰淇淋，抹茶饮品（忘了拍菜单）\n只能说喜欢抹茶的有福了\n☕️但是我点了Coffee with soft serve, 我以为上面是奶油，结果是冰淇淋","url":"https://www.xiaohongshu.com/search_result/6a5c4faa000000000f008c46","parent_id":"","collected_at":"2026-09-05T10:21:32.505942+00:00","source_type":"xiaohongshu_mcp","geo_scope":"新加坡","research_groups":["brand","segment"],"query_ids":["brand"],"visible_engagement":""},
