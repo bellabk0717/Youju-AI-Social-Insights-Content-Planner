@@ -19,7 +19,7 @@ SHOWCASE_MODE=os.getenv('SHOWCASE_MODE','').lower() in {'1','true','yes'}
 STATEFILE=DATA/'workspace.json'
 state=json.loads(STATEFILE.read_text()) if STATEFILE.exists() else {'records':[],'logs':[],'task':{},'analysis':None,'plan':None,'job':{'status':'idle'}}
 SHOWCASEFILE=DATA/'showcase.json'
-if SHOWCASEFILE.exists():
+if SHOWCASE_MODE and SHOWCASEFILE.exists():
     archived=json.loads(SHOWCASEFILE.read_text())
     needs_showcase=(not state.get('records') and not state.get('analysis') and not state.get('plan')) or state.get('showcase_version',0)<archived.get('showcase_version',1)
     if needs_showcase:
@@ -154,6 +154,12 @@ async def llm(system,user):
 @app.get('/api/state')
 async def get_state():
     return {**state,'configuration':{'base_url':config['base_url'],'model':config['model'],'configured':bool(config['api_key']),'verified':config_ok,'showcase':SHOWCASE_MODE}}
+
+@app.get('/api/showcase')
+async def get_showcase():
+    if not SHOWCASEFILE.exists():raise HTTPException(404,'展示案例不存在。')
+    archived=json.loads(SHOWCASEFILE.read_text())
+    return {**archived,'logs':[],'job':{'status':'idle','message':'nana’s green tea 展示案例已加载'},'configuration':{'showcase':True,'embedded':True,'verified':False}}
 
 @app.post('/api/config')
 async def set_config(c:Configuration):
