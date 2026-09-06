@@ -20,5 +20,4 @@ COPY data/showcase.json ./data/showcase.json
 RUN mkdir -p /app/runtime
 
 EXPOSE 8765
-VOLUME ["/app/runtime"]
 CMD ["sh", "-c", "python -m uvicorn backend.app:app --host 0.0.0.0 --port ${PORT:-8765} --proxy-headers --forwarded-allow-ips '*' "]
