@@ -1,7 +1,7 @@
 """Read-only MCP adaptation of the supplied Redbook-Search-Comment-MCP2.0.
 Reuses its persistent-browser strategy and DOM selectors; no publication tools.
 """
-import asyncio, os, re
+import asyncio, base64, os, re, time
 from pathlib import Path
 from urllib.parse import quote, urlparse
 from datetime import datetime, timezone
@@ -9,25 +9,33 @@ from fastmcp import FastMCP
 from playwright.async_api import async_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
+RUNTIME = Path(os.getenv('RUNTIME_DATA_DIR', ROOT/'data'))
 mcp = FastMCP('coffee-xiaohongshu-readonly')
-context = page = pw = None
-last_search_url = ""
+sessions = {}
 lock = asyncio.Lock()
 
-async def browser():
-    global context, page, pw
-    if page is not None and page.is_closed():
-        context = page = None
-        if pw is not None:
-            await pw.stop()
-            pw = None
-    if context is None:
-        pw = await async_playwright().start()
-        context = await pw.chromium.launch_persistent_context(
-            str(ROOT/'data/browser-profile'), channel='chrome', headless=False,
-            viewport={'width':1280,'height':850}, args=['--disable-session-crashed-bubble'])
-        page = context.pages[0] if context.pages else await context.new_page()
-        page.set_default_timeout(15000)
+def clean_session(value):
+    return value if re.fullmatch(r'[A-Za-z0-9_-]{1,64}',value or '') else 'local'
+
+async def browser(session_id='local'):
+    sid=clean_session(session_id);entry=sessions.get(sid)
+    if entry and not entry['page'].is_closed():entry['used']=time.monotonic();return entry['page']
+    if entry:
+        try:await entry['context'].close();await entry['pw'].stop()
+        except Exception:pass
+    maximum=max(1,int(os.getenv('MAX_BROWSER_SESSIONS','3')))
+    if len(sessions)>=maximum:
+        oldest=min(sessions,key=lambda key:sessions[key]['used']);old=sessions.pop(oldest)
+        try:await old['context'].close();await old['pw'].stop()
+        except Exception:pass
+    pw=await async_playwright().start()
+    profile=RUNTIME/'browser-profiles'/sid;profile.mkdir(parents=True,exist_ok=True)
+    launch={'headless':os.getenv('BROWSER_HEADLESS','').lower() in {'1','true','yes'},'viewport':{'width':1280,'height':850},'args':['--disable-session-crashed-bubble','--no-sandbox']}
+    channel=os.getenv('BROWSER_CHANNEL','chrome').strip()
+    if channel:launch['channel']=channel
+    context=await pw.chromium.launch_persistent_context(str(profile),**launch)
+    page=context.pages[0] if context.pages else await context.new_page();page.set_default_timeout(15000)
+    sessions[sid]={'pw':pw,'context':context,'page':page,'last_search_url':'','used':time.monotonic()}
     return page
 
 async def gate(p):
@@ -36,6 +44,8 @@ async def gate(p):
         if word in text: return {'status':'needs_action','message':f'小红书页面提示：{word}。请在打开的浏览器完成操作。'}
     if await p.locator('.login-container, .login-modal, .login-box').count():
         return {'status':'needs_login','message':'请在打开的小红书浏览器窗口扫码登录，然后重试。'}
+    if await p.get_by_text('登录',exact=True).count():
+        return {'status':'needs_login','message':'请使用小红书 App 扫描二维码登录。'}
     return None
 
 def valid(url):
@@ -45,25 +55,32 @@ def valid(url):
     return url
 
 @mcp.tool()
-async def login_status() -> dict:
+async def login_status(session_id: str='local') -> dict:
     """Open Xiaohongshu for user login and return visible page state. Does not enter credentials."""
     async with lock:
-        p=await browser()
+        p=await browser(session_id)
         if 'xiaohongshu.com' not in p.url:
             await p.goto('https://www.xiaohongshu.com/explore',wait_until='commit',timeout=25000)
             await p.wait_for_timeout(1800)
+        login_button=p.get_by_text('登录',exact=True).first
+        if await login_button.count() and await login_button.is_visible():
+            try:await login_button.click(timeout=3000);await p.wait_for_timeout(800)
+            except Exception:pass
         blocked=await gate(p)
-        if blocked: return blocked
-        me=await p.locator('a[href*="/user/profile/"]').count()
-        return {'status':'ready' if me else 'browser_open','message':'浏览器已就绪；真实搜索会进一步确认读取能力。' if me else '已打开小红书；如出现登录提示，请在浏览器完成登录。'}
+        if blocked:
+            blocked['screenshot']='data:image/png;base64,'+base64.b64encode(await p.screenshot()).decode()
+            return blocked
+        cookie_names={x['name'] for x in await p.context.cookies()};logged_in='web_session' in cookie_names
+        result={'status':'ready' if logged_in else 'browser_open','message':'小红书登录成功，可以开始分析。' if logged_in else '当前小红书页面可直接读取；如果平台要求登录，页面会显示二维码供本人扫描。'}
+        if not logged_in:result['screenshot']='data:image/png;base64,'+base64.b64encode(await p.screenshot()).decode()
+        return result
 
 @mcp.tool()
-async def search_notes(keywords: str, limit: int=6) -> dict:
+async def search_notes(keywords: str, limit: int=6, session_id: str='local') -> dict:
     """Search real Xiaohongshu note cards. Returns source URLs, not generated content."""
-    global last_search_url
     async with lock:
-        p=await browser()
-        last_search_url='https://www.xiaohongshu.com/search_result?keyword='+quote(keywords)
+        p=await browser(session_id);sid=clean_session(session_id)
+        last_search_url='https://www.xiaohongshu.com/search_result?keyword='+quote(keywords);sessions[sid]['last_search_url']=last_search_url
         await p.goto(last_search_url,wait_until='commit',timeout=25000)
         try: await p.locator('section.note-item').first.wait_for(timeout=12000)
         except Exception: pass
@@ -81,8 +98,8 @@ async def search_notes(keywords: str, limit: int=6) -> dict:
             if path not in seen: out.append(r);seen.add(path)
         return {'status':'ok' if out else 'empty','query':keywords,'notes':out[:max(1,min(limit,12))], 'message':'' if out else '页面没有可读取笔记。请检查浏览器是否需要登录或验证。'}
 
-async def note_page(url):
-    p=await browser()
+async def note_page(url,session_id='local'):
+    p=await browser(session_id);sid=clean_session(session_id);last_search_url=sessions[sid].get('last_search_url','')
     valid(url)
     note_id=urlparse(url).path.rsplit('/',1)[-1]
     if note_id not in p.url or not await p.locator('#detail-desc,.note-text,.note-content').count():
@@ -102,10 +119,10 @@ async def note_page(url):
     return p
 
 @mcp.tool()
-async def get_note_content(url: str) -> dict:
+async def get_note_content(url: str, session_id: str='local') -> dict:
     """Read a real note's visible title/body, preserving original URL and retrieval timestamp."""
     async with lock:
-        p=await note_page(url)
+        p=await note_page(url,session_id)
         blocked=await gate(p)
         if blocked:return blocked
         row=await p.evaluate('''() => ({
@@ -117,10 +134,10 @@ async def get_note_content(url: str) -> dict:
         return row
 
 @mcp.tool()
-async def get_note_comments(url: str, limit: int=20) -> dict:
+async def get_note_comments(url: str, limit: int=20, session_id: str='local') -> dict:
     """Read visible real comments only; do not fabricate missing comments or interact/post."""
     async with lock:
-        p=await note_page(url)
+        p=await note_page(url,session_id)
         blocked=await gate(p)
         if blocked:return blocked
         section=p.locator('.comments-container,.comments-el').first
@@ -139,10 +156,10 @@ async def get_note_comments(url: str, limit: int=20) -> dict:
                 'collected_at':datetime.now(timezone.utc).isoformat(),'message':'' if out else '未读取到可见评论；不能视为没有消费者意见。'}
 
 @mcp.tool()
-async def diagnostics() -> dict:
+async def diagnostics(session_id: str='local') -> dict:
     """Read bounded connection and selector diagnostics, never credentials/cookies."""
     async with lock:
-        p=await browser()
+        p=await browser(session_id)
         async with asyncio.timeout(12):
             return await page_diagnostics(p)
 

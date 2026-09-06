@@ -53,29 +53,36 @@ macOS 也可以双击 `启动工作台.command`。打开 <http://127.0.0.1:8765>
 
 ## 部署完整产品
 
-完整产品需要运行 FastAPI 后端，不能只放在 OSS 或 OBS。建议部署到阿里云 ECS/轻量应用服务器或华为云 ECS，并配置 Python 3.12、Chrome、持久磁盘和 HTTPS 反向代理。
+完整产品需要常驻 FastAPI、MCP 和 Chromium，Cloudflare Pages、OSS、OBS 等静态托管不能运行它。当前公开 MVP 已支持：
 
-当前产品采用本机 Chrome 窗口完成小红书扫码登录，因此本地运行体验最完整。要让远程用户使用云端版本，下一步需要把登录二维码显示到产品页面，并为不同用户隔离登录会话。公开给多人使用前，还需要增加产品登录、数据库、对象存储和异步任务队列。
+- 每位访客独立的任务、上传资料、模型配置和小红书浏览器目录；
+- API Key 只保存在该访客的服务端内存会话，不写入任务文件；
+- 网页内显示小红书登录画面，用户扫描自己的账号；
+- 内置 nana’s green tea 展示案例，不调用访客 API；
+- Docker 部署与持久运行目录。
 
-Render 免费实例没有适合当前浏览器会话的持久运行环境，正式产品优先使用带持久磁盘的云服务器。
+### 推荐：Railway
 
-### 当天可用：Cloudflare Tunnel
+Railway 能直接从 GitHub 读取 `Dockerfile`，自动提供 HTTPS 链接，并能挂载持久 Volume。部署步骤：
 
-Cloudflare Pages 只能托管前端文件，不能直接运行本项目的 FastAPI、MCP 子进程和持久 Chrome。需要快速得到一个可访问地址时，可以让 Cloudflare Tunnel 安全转发到本机完整产品：
+1. 在 Railway 新建项目，选择 **Deploy from GitHub repo**，授权并选择 `bellabk0717/-`。
+2. Railway 会自动识别根目录的 `Dockerfile`。不填写 Build Command 和 Start Command。
+3. 在服务的 **Variables** 添加：
+   - `ALLOW_REMOTE=1`
+   - `COOKIE_SECURE=1`
+   - `BROWSER_HEADLESS=1`
+   - `BROWSER_CHANNEL=`（空值）
+   - `RUNTIME_DATA_DIR=/app/runtime`
+   - `MAX_BROWSER_SESSIONS=3`
+4. 在项目画布中添加 **Volume**，连接到该服务，Mount Path 填 `/app/runtime`。
+5. 在服务 **Settings → Deploy → Healthcheck Path** 填 `/health`。
+6. 在服务 **Settings → Networking** 中选择 **Generate Domain**。
+7. 等部署状态变成 Active，打开 Railway 提供的 HTTPS 地址。
+8. 先验证“查看展示案例”；真实采集留给其他访客使用自己的账号和 API Key。
 
-1. 使用远程访问模式启动产品：
+建议使用 Railway Hobby 计划并给服务至少 2 GB 内存；Chromium 不适合极小内存实例。当前 MVP 将浏览器并发限制为 3，超过时会关闭最久未使用的浏览器进程，登录目录仍保存在 Volume 中。
 
-   ```bash
-   ALLOW_REMOTE=1 .venv/bin/python -m uvicorn backend.app:app --host 127.0.0.1 --port 8765
-   ```
-
-2. 在 Cloudflare 控制台进入 **Networking → Tunnels**，创建名为 `youju-xhs` 的 Tunnel。
-3. 选择 macOS，复制控制台生成的安装命令并在本机执行；不要把 Tunnel Token 写入仓库或聊天。
-4. 在 Tunnel 的 **Routes** 中添加 **Published application**，Service URL 填写 `http://localhost:8765`。
-5. 使用自己的域名时填写一个子域名，例如 `youju.example.com`。保存后等待 Tunnel 状态变为 Healthy。
-6. 在 **Zero Trust → Access controls → Applications** 中为这个域名创建 Self-hosted 应用，只允许自己的邮箱访问。
-
-此方式运行的是完整产品，模型 API、小红书 Chrome 登录与工作区数据仍保存在本机。电脑关机或本地服务停止后，外部地址会暂时不可用。
+如果 Railway 所在网络无法稳定访问小红书，备用方案是阿里云新加坡 ECS（Ubuntu、2 vCPU、4 GB 内存），使用同一个 Dockerfile 和 `/app/runtime` 持久目录部署。
 
 ## 仓库数据策略
 

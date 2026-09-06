@@ -1,8 +1,11 @@
 import asyncio, hashlib, io, json, os, re, secrets, sys, time, zipfile
+from collections.abc import MutableMapping
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 import httpx, jieba
 from rank_bm25 import BM25Okapi
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
@@ -15,31 +18,53 @@ from backend.research import research_plan, scoped_retrieval, check_findings, an
 from backend.writing import content_quality_issues, select_style_references
 
 ROOT=Path(__file__).resolve().parents[1]; DATA=ROOT/'data';DATA.mkdir(exist_ok=True)
+RUNTIME=Path(os.getenv('RUNTIME_DATA_DIR',DATA));RUNTIME.mkdir(parents=True,exist_ok=True)
+SESSIONDIR=RUNTIME/'sessions';SESSIONDIR.mkdir(exist_ok=True)
 SHOWCASE_MODE=os.getenv('SHOWCASE_MODE','').lower() in {'1','true','yes'}
 ALLOW_REMOTE=os.getenv('ALLOW_REMOTE','').lower() in {'1','true','yes'}
-STATEFILE=DATA/'workspace.json'
-state=json.loads(STATEFILE.read_text()) if STATEFILE.exists() else {'records':[],'logs':[],'task':{},'analysis':None,'plan':None,'job':{'status':'idle'}}
 SHOWCASEFILE=DATA/'showcase.json'
-if SHOWCASE_MODE and SHOWCASEFILE.exists():
-    archived=json.loads(SHOWCASEFILE.read_text())
-    needs_showcase=(not state.get('records') and not state.get('analysis') and not state.get('plan')) or state.get('showcase_version',0)<archived.get('showcase_version',1)
-    if needs_showcase:
-        state.update(task=archived.get('task',state.get('task',{})),records=archived['records'],coverage=archived['coverage'],analysis=archived['analysis'],plan=archived['plan'],archive_counts=archived['archive_counts'],showcase_version=archived.get('showcase_version',1))
-        state['job']={'status':'idle','message':'展示案例已从本地归档恢复'}
-if state['job'].get('status')=='running':state['job']={'status':'interrupted','message':'上次任务中断，可重新开始。'}
-if state.get('plan') and state.get('task'):
-    migrated_issues=content_quality_issues(state['plan'],state['task'])
-    if migrated_issues:
-        existing=state['plan'].setdefault('validation',{'passed':False,'issues':[]})
-        existing['issues']=list(dict.fromkeys(existing.get('issues',[])+migrated_issues))
-        existing['passed']=False
-config={'base_url':os.getenv('COFFEE_API_BASE','https://dashscope.aliyuncs.com/compatible-mode/v1'),'model':os.getenv('COFFEE_MODEL','qwen-plus'),'api_key':os.getenv('COFFEE_API_KEY','')}
-config_ok=False
+session_var=ContextVar('youju_session',default='local')
+states={};configs={};job_locks={}
+
+def empty_state():return {'records':[],'logs':[],'task':{},'analysis':None,'plan':None,'job':{'status':'idle','message':'可以开始新的分析'}}
+def session_file(sid):return SESSIONDIR/f'{sid}.json'
+def load_state(sid):
+    path=session_file(sid)
+    if path.exists():
+        try:value=json.loads(path.read_text())
+        except Exception:value=empty_state()
+    elif sid=='local' and (DATA/'workspace.json').exists():value=json.loads((DATA/'workspace.json').read_text())
+    else:value=empty_state()
+    if SHOWCASE_MODE and SHOWCASEFILE.exists():
+        archived=json.loads(SHOWCASEFILE.read_text());value.update(archived)
+        value['job']={'status':'idle','message':'展示案例已从本地归档恢复'}
+    if value.get('job',{}).get('status')=='running':value['job']={'status':'interrupted','message':'上次任务中断，可重新开始。'}
+    return value
+def current_state():
+    sid=session_var.get()
+    if sid not in states:states[sid]=load_state(sid)
+    return states[sid]
+def current_config():
+    sid=session_var.get()
+    if sid not in configs:configs[sid]={'base_url':os.getenv('COFFEE_API_BASE','https://dashscope.aliyuncs.com/compatible-mode/v1'),'model':os.getenv('COFFEE_MODEL','qwen-plus'),'api_key':'','verified':False}
+    return configs[sid]
+def current_job_lock():
+    sid=session_var.get()
+    if sid not in job_locks:job_locks[sid]=asyncio.Lock()
+    return job_locks[sid]
+class SessionMap(MutableMapping):
+    def __init__(self,getter):self.getter=getter
+    def __getitem__(self,key):return self.getter()[key]
+    def __setitem__(self,key,value):self.getter()[key]=value
+    def __delitem__(self,key):del self.getter()[key]
+    def __iter__(self):return iter(self.getter())
+    def __len__(self):return len(self.getter())
+state=SessionMap(current_state);config=SessionMap(current_config)
 client=None
-job_lock=asyncio.Lock();mcp_lock=asyncio.Lock()
+mcp_lock=asyncio.Lock()
 
 def save():
-    tmp=STATEFILE.with_suffix('.tmp');tmp.write_text(json.dumps(state,ensure_ascii=False,indent=2));tmp.replace(STATEFILE)
+    path=session_file(session_var.get());tmp=path.with_suffix('.tmp');tmp.write_text(json.dumps(dict(state),ensure_ascii=False,indent=2));tmp.replace(path)
 def log(stage,message,**extra):
     state['logs'].append({'time':datetime.now().strftime('%H:%M:%S'),'stage':stage,'message':message,**extra});state['logs']=state['logs'][-120:];save()
 
@@ -54,7 +79,7 @@ async def lifespan(app):
     if SHOWCASE_MODE:
         yield
         return
-    transport=PythonStdioTransport(ROOT/'backend/xhs_mcp.py',python_cmd=sys.executable,cwd=str(ROOT),env={'FASTMCP_CHECK_FOR_UPDATES':'off','FASTMCP_ENABLE_RICH_LOGGING':'false'})
+    transport=PythonStdioTransport(ROOT/'backend/xhs_mcp.py',python_cmd=sys.executable,cwd=str(ROOT),env={'FASTMCP_CHECK_FOR_UPDATES':'off','FASTMCP_ENABLE_RICH_LOGGING':'false','RUNTIME_DATA_DIR':str(RUNTIME),'BROWSER_HEADLESS':os.getenv('BROWSER_HEADLESS',''),'BROWSER_CHANNEL':os.getenv('BROWSER_CHANNEL','chrome')})
     async with Client(transport) as c:
         client=c
         names=[x.name for x in await c.list_tools()]
@@ -62,22 +87,34 @@ async def lifespan(app):
         yield
 
 app=FastAPI(lifespan=lifespan)
+
+@app.get('/health')
+async def health():
+    return {'ok':True}
+
 @app.middleware('http')
 async def local_only(request:Request,call_next):
+    sid=request.cookies.get('youju_session','')
+    if not re.fullmatch(r'[A-Za-z0-9_-]{32,64}',sid):sid=secrets.token_urlsafe(32)
+    token=session_var.set(sid)
     if SHOWCASE_MODE:
         if request.method not in {'GET','HEAD','OPTIONS'}:
-            return JSONResponse({'detail':'在线版本用于查看已归档案例；真实采集与生成请在本地运行。'},status_code=403)
-        return await call_next(request)
-    if not ALLOW_REMOTE:
+            session_var.reset(token);return JSONResponse({'detail':'在线版本用于查看已归档案例；真实采集与生成请在本地运行。'},status_code=403)
+    elif not ALLOW_REMOTE:
         origin=request.headers.get('origin','')
         if origin and origin not in ['http://127.0.0.1:8765','http://localhost:8765']:
-            return Response('Local access only',status_code=403)
+            session_var.reset(token);return Response('Local access only',status_code=403)
         if request.headers.get('host','').split(':')[0] not in ['127.0.0.1','localhost','testserver']:
-            return Response('Local access only',status_code=403)
-    return await call_next(request)
+            session_var.reset(token);return Response('Local access only',status_code=403)
+    try:
+        response=await call_next(request)
+        response.set_cookie('youju_session',sid,max_age=60*60*24*7,httponly=True,samesite='lax',secure=os.getenv('COOKIE_SECURE','').lower() in {'1','true','yes'})
+        return response
+    finally:session_var.reset(token)
 
-async def tool(name,args):
+async def tool(name,args,allow_status=False):
     async with mcp_lock:
+        args={**args,'session_id':session_var.get()}
         log('MCP',f'调用 {name}',arguments=args)
         t=time.monotonic()
         try:
@@ -89,10 +126,11 @@ async def tool(name,args):
         if not isinstance(d,dict):
             d=json.loads(next(x.text for x in r.content if getattr(x,'type','')=='text'))
         log('MCP',f'{name} → {d.get("status","returned")}',duration=round(time.monotonic()-t,2))
-        if d.get('status') in ['needs_login','needs_action']:raise ValueError(d['message'])
+        if not allow_status and d.get('status') in ['needs_login','needs_action']:raise ValueError(d['message'])
         return d
 
 async def background(label,fn):
+    job_lock=current_job_lock()
     if job_lock.locked():raise HTTPException(409,'已有任务运行，请等待完成。')
     # Set status synchronously; lock acquisition takes place in this request, not a scheduled race.
     await job_lock.acquire()
@@ -155,7 +193,7 @@ async def llm(system,user):
 
 @app.get('/api/state')
 async def get_state():
-    return {**state,'configuration':{'base_url':config['base_url'],'model':config['model'],'configured':bool(config['api_key']),'verified':config_ok,'showcase':SHOWCASE_MODE}}
+    return {**state,'configuration':{'base_url':config['base_url'],'model':config['model'],'configured':bool(config['api_key']),'verified':config['verified'],'showcase':SHOWCASE_MODE}}
 
 @app.get('/api/showcase')
 async def get_showcase():
@@ -165,30 +203,32 @@ async def get_showcase():
 
 @app.post('/api/config')
 async def set_config(c:Configuration):
-    global config_ok
-    if job_lock.locked():raise HTTPException(409,'请等待当前任务结束再更新配置。')
+    if current_job_lock().locked():raise HTTPException(409,'请等待当前任务结束再更新配置。')
     if not c.base_url.startswith('https://'):raise HTTPException(400,'模型服务地址必须使用 HTTPS。')
+    allowed={'api.openai.com','dashscope.aliyuncs.com','api.deepseek.com'}|{x.strip().lower() for x in os.getenv('EXTRA_API_HOSTS','').split(',') if x.strip()}
+    if (urlparse(c.base_url).hostname or '').lower() not in allowed:raise HTTPException(400,'公开版本只允许 OpenAI、阿里百炼和 DeepSeek 官方接口；其他兼容接口需由部署者加入白名单。')
     try:c.api_key=clean_api_key(c.api_key)
     except ValueError as e:raise HTTPException(400,str(e))
-    config.update(c.model_dump());config_ok=False
+    config.update(c.model_dump());config['verified']=False
     try:
         d=await llm('只输出 JSON 对象。',{'request':'返回 {"ok":true}，用于连接测试。'})
-        config_ok=d.get('ok') is True
-        if not config_ok:raise ValueError('接口响应成功，但连接测试结构未通过。')
+        config['verified']=d.get('ok') is True
+        if not config['verified']:raise ValueError('接口响应成功，但连接测试结构未通过。')
     except Exception as e:raise HTTPException(400,safe_error(e))
     return {'ok':True}
 
 @app.get('/api/mcp-diagnostics')
 async def mcp_diagnostics():
-    if job_lock.locked():raise HTTPException(409,'采集进行中，稍后诊断。')
+    if current_job_lock().locked():raise HTTPException(409,'采集进行中，稍后诊断。')
     try:return await tool('diagnostics',{})
     except Exception as e:raise HTTPException(400,safe_error(e))
 
 @app.post('/api/login')
 async def login():
-    async def run():
-        result=await tool('login_status',{});log('登录',result.get('message','浏览器已打开'))
-    return await background('打开小红书登录',run)
+    try:
+        result=await tool('login_status',{},allow_status=True);log('登录',result.get('message','登录页面已打开'))
+        return result
+    except Exception as e:raise HTTPException(400,safe_error(e))
 
 def record(kind,text,url,parent='',title='',**meta):
     normalized=' '.join(text.split())
